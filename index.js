@@ -7,7 +7,7 @@ const puerto = 3000
 const dbConfig = {
     user: 'gestion_usuarios',
     password: 'gestion_usuarios',
-    connectString: 'localhost/XE'
+    connectString: 'localhost/orcl.duoc.com.cl'
 }
 const API_KEY ='gestion_usuarios123.'
 
@@ -31,7 +31,7 @@ app.get('/usuarios',validarApiKey,async (req,res)=>{
     let cone
     try{
         cone = await oracledb.getConnection(dbConfig)
-        const result = await cone.execute("Select * FROM usuario")
+        const result = await cone.execute("Select * FROM usuario join ")
         res.status(200).json(result.rows.map(row => ({
             rut : row[0],
             nombre : row[1],
