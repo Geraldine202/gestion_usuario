@@ -1,16 +1,22 @@
 //1.Importar librerias
 const express = require('express')
 const oracledb = require('oracledb')
+const cors = require('cors');
 //2. Vamos a crear nuestra api
 const app = express()
 const puerto = 3000
 const dbConfig = {
     user: 'gestion_usuarios',
     password: 'gestion_usuarios',
-    connectString: 'localhost/orcl.duoc.com.cl'
+    connectString: 'localhost/XE'
+    //connectString: 'localhost/orcl.duoc.com.cl'
 }
 const API_KEY ='gestion_usuarios123.'
-
+app.use(cors({
+  origin: 'http://localhost:8100',
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'x-api-key']
+}));
 function validarApiKey(req, res, next){
     const apiKey = req.headers['x-api-key']
     if(!apiKey || apiKey !== API_KEY){
@@ -31,7 +37,24 @@ app.get('/usuarios',validarApiKey,async (req,res)=>{
     let cone
     try{
         cone = await oracledb.getConnection(dbConfig)
-        const result = await cone.execute("Select * FROM usuario join ")
+        const result = await cone.execute(`
+        SELECT 
+                u.rut_usuario,
+                u.nombre,
+                u.primer_apellido,
+                u.segundo_apellido,
+                u.genero,
+                u.correo,
+                u.direccion,
+                u.telefono,
+                u.fecha_nacimiento,
+                tu.descripcion,
+                s.nombre_sucursal,
+                c.nombre_comuna
+            FROM usuario u
+            JOIN tipo_usuario tu ON u.id_tipo_usuario = tu.id_tipo_usuario
+            JOIN sucursal s ON u.id_sucursal = s.id_sucursal
+            JOIN comuna c ON u.id_comuna = c.id_comuna`)
         res.status(200).json(result.rows.map(row => ({
             rut : row[0],
             nombre : row[1],
@@ -42,9 +65,9 @@ app.get('/usuarios',validarApiKey,async (req,res)=>{
             direccion : row[6],
             telefono : row[7],
             fecha_nacimiento : row[8],
-            id_tipo_usuario : row[9],
-            id_sucursal : row[10],
-            id_comuna : row[11],
+            tipo_usuario : row[9],
+            sucursal : row[10],
+            comuna : row[11],
         })))
     }catch(ex){
         res.status(500).json({error: ex.message} )
@@ -89,23 +112,55 @@ app.get('/usuarios/:rut', async (req, res) => {
 })
 
 app.post('/usuarios', async (req, res) => {
-    let cone
-    const {rut,nombre,primer_apellido,segundo_apellido,genero,correo,direccion,telefono,fecha_nacimiento,id_tipo_usuario,id_sucursal,id_comuna} = req.body
+    let cone;
+    const {rut,nombre,primer_apellido,segundo_apellido,genero,correo,direccion,telefono,fecha_nacimiento,tipo_usuario,sucursal,comuna} = req.body;
     try {
-        cone = await oracledb.getConnection(dbConfig)
+        cone = await oracledb.getConnection(dbConfig);
+
+        // Obtener id_tipo_usuario a partir de tipo_usuario (nombre)
+        const resultTipoUsuario = await cone.execute(
+            `SELECT id_tipo_usuario FROM tipo_usuario WHERE descripcion = :descripcion`,
+            [tipo_usuario]
+        );
+        if(resultTipoUsuario.rows.length === 0) {
+            return res.status(400).json({error: "Tipo de usuario no válido"});
+        }
+        const id_tipo_usuario = resultTipoUsuario.rows[0][0];
+
+        // Obtener id_sucursal a partir de sucursal (nombre)
+        const resultSucursal = await cone.execute(
+            `SELECT id_sucursal FROM sucursal WHERE nombre_sucursal = :nombre_sucursal`,
+            [sucursal]
+        );
+        if(resultSucursal.rows.length === 0) {
+            return res.status(400).json({error: "Sucursal no válida"});
+        }
+        const id_sucursal = resultSucursal.rows[0][0];
+
+        // Obtener id_comuna a partir de comuna (nombre)
+        const resultComuna = await cone.execute(
+            `SELECT id_comuna FROM comuna WHERE nombre_comuna = :nombre_comuna`,
+            [comuna]
+        );
+        if(resultComuna.rows.length === 0) {
+            return res.status(400).json({error: "Comuna no válida"});
+        }
+        const id_comuna = resultComuna.rows[0][0];
+
+        // Ahora insertamos usando los IDs
         await cone.execute(
-            `INSERT INTO alumno
-             VALUES(:rut, :nombre, :primer_apellido, :segundo_apellido, :genero,:correo,:direccion,:telefono,:fecha_nacimiento,:id_tipo_usuario,:id_sucursal,:id_comuna)`
-            ,{rut,nombre,primer_apellido,segundo_apellido,genero,correo,direccion,telefono,fecha_nacimiento,id_tipo_usuario,id_sucursal,id_comuna}
-            ,{autoCommit: true}
-        )
-        res.status(201).json({mensaje: "Usuario creado"})
+            `INSERT INTO usuario VALUES(:rut, :nombre, :primer_apellido, :segundo_apellido, :genero, :correo, :direccion, :telefono, TO_DATE(:fecha_nacimiento,'YYYY-MM-DD'), :id_tipo_usuario, :id_sucursal, :id_comuna)`,
+            { rut, nombre, primer_apellido, segundo_apellido, genero, correo, direccion, telefono, fecha_nacimiento, id_tipo_usuario, id_sucursal, id_comuna },
+            { autoCommit: true }
+        );
+        res.status(201).json({mensaje: "Usuario creado"});
     } catch (error) {
-        res.status(500).json({error: error.message})
+        res.status(500).json({error: error.message});
     } finally {
-        if (cone) cone.close()
+        if(cone) cone.close();
     }
-})
+});
+
 
 app.put('/usuarios/:rut', async(req, res) => {
     let cone
@@ -114,7 +169,7 @@ app.put('/usuarios/:rut', async(req, res) => {
     try {
         cone = await oracledb.getConnection(dbConfig)
         const result = await cone.execute(
-            `UPDATE alumno
+            `UPDATE usuario
             SET nombre = :nombre,primer_apellido = :primer_apellido,segundo_apellido = :segundo_apellido,genero = :genero,correo = :correo,direccion = :direccion,telefono = :telefono,fecha_nacimiento = :fecha_nacimiento,id_tipo_usuario = :id_tipo_usuario,id_sucursal = :id_sucursal,id_comuna = :id_comuna
             WHERE rut = :rut`
             ,{rut,nombre,primer_apellido,segundo_apellido,genero,correo,direccion,telefono,fecha_nacimiento,id_tipo_usuario,id_sucursal,id_comuna}
