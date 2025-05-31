@@ -51,7 +51,6 @@
     });
 
 
-
     app.get('/test-conexion', async (req, res) => {
         let cone
         try {
@@ -145,17 +144,20 @@
         try{
             cone = await oracledb.getConnection(dbConfig)
             const result = await cone.execute(`
-            SELECT
-              p.id_pago,
-              p.monto_total,
-              p.fecha_pago,
-              tp.descripcion,
-              u.nombre ||' ' ||u.primer_apellido||' '||u.segundo_apellido,
-              p.id_pedido,
-              p.imagen
-            FROM pago p
-            LEFT JOIN tipo_pago tp ON p.id_tipo_pago = tp.id_tipo_pago
-            LEFT JOIN usuario u ON p.rut_usuario = u.rut_usuario`)
+          SELECT
+            p.id_pago,
+            p.monto_total,
+            p.fecha_pago,
+            tp.descripcion AS tipo_pago,
+            u.nombre || ' ' || u.primer_apellido || ' ' || u.segundo_apellido AS nombre_completo,
+            ep.descripcion AS estado_pago,
+            p.id_pedido,
+            p.imagen
+          FROM pago p
+          LEFT JOIN tipo_pago tp ON p.id_tipo_pago = tp.id_tipo_pago
+          LEFT JOIN usuario u ON p.rut_usuario = u.rut_usuario
+          LEFT JOIN pedido ped ON p.id_pedido = ped.id_pedido
+          LEFT JOIN estado_pago ep ON ped.id_estado_pago = ep.id_estado_pago`)
             res.status(200).json(result.rows.map(row => ({
                 id_pago : row[0],
                 monto_total : row[1],
@@ -171,6 +173,403 @@
             if (cone) cone.close()
         }
     })
+
+    // Obtener pagos pendientes de aprobación (con información completa)
+app.get('/pagos_pendientes', validarApiKey, async (req, res) => {
+    let cone;
+    try {
+        cone = await oracledb.getConnection(dbConfig);
+        
+        const query = `
+        SELECT 
+            p.id_pago,
+            p.monto_total,
+            p.fecha_pago,
+            p.imagen,
+            tp.descripcion AS tipo_pago,
+            ep.descripcion AS estado_pago,
+            pd.id_pedido,
+            pd.total_a_pagar,
+            u.rut_usuario,
+            u.nombre || ' ' || u.primer_apellido AS cliente,
+            s.nombre_sucursal
+        FROM 
+            pago p
+        JOIN 
+            pedido pd ON p.id_pedido = pd.id_pedido
+        JOIN 
+            estado_pago ep ON pd.id_estado_pago = ep.id_estado_pago
+        JOIN 
+            tipo_pago tp ON p.id_tipo_pago = tp.id_tipo_pago
+        JOIN 
+            usuario u ON pd.rut_usuario = u.rut_usuario
+        LEFT JOIN 
+            sucursal s ON pd.id_sucursal = s.id_sucursal
+        WHERE 
+            pd.id_estado_pago = 1  -- Solo pagos pendientes
+        ORDER BY 
+            p.fecha_pago ASC`;
+
+        const result = await cone.execute(query);
+        
+        const pagos = result.rows.map(row => ({
+            id_pago: row[0],
+            monto_total: row[1],
+            fecha_pago: row[2],
+            imagen_comprobante: row[3],
+            tipo_pago: row[4],
+            estado_pago: row[5],
+            id_pedido: row[6],
+            total_pedido: row[7],
+            rut_cliente: row[8],
+            nombre_cliente: row[9],
+            sucursal: row[10]
+        }));
+
+        res.status(200).json(pagos);
+    } catch (ex) {
+        console.error('Error al obtener pagos pendientes:', ex);
+        res.status(500).json({ error: ex.message });
+    } finally {
+        if (cone) await cone.close();
+    }
+});
+// Actualizar estado del pedido (directamente)
+app.patch('/pedidos/:id_pedido', validarApiKey, async (req, res) => {
+    let cone;
+    const { id_pedido } = req.params;
+    const { nuevo_estado } = req.body; // 2 = Aprobado, 3 = Rechazado
+
+    try {
+        cone = await oracledb.getConnection(dbConfig);
+        
+        // Actualizar estado
+        const result = await cone.execute(
+            `UPDATE pedido 
+             SET id_estado_pago = :nuevo_estado 
+             WHERE id_pedido = :id_pedido`,
+            [nuevo_estado, id_pedido],
+            { autoCommit: true }
+        );
+
+        if (result.rowsAffected === 0) {
+            return res.status(404).json({ 
+                success: false,
+                error: "Pedido no encontrado" 
+            });
+        }
+
+        res.status(200).json({ 
+            success: true,
+            message: "Estado de pago actualizado correctamente",
+            id_pedido,
+            nuevo_estado
+        });
+
+    } catch (ex) {
+        console.error('Error al actualizar estado:', ex);
+        res.status(500).json({ 
+            success: false,
+            error: ex.message
+        });
+    } finally {
+        if (cone) await cone.close();
+    }
+});
+
+app.get('/pedidos-pagados', validarApiKey, async (req, res) => {
+  let cone;
+  try {
+    cone = await oracledb.getConnection(dbConfig);
+    const result = await cone.execute(`
+      SELECT p.*, ep.descripcion as estado_pago_desc, 
+             ept.descripcion as estado_pedido_desc,
+             u.nombre || ' ' || u.primer_apellido as cliente
+      FROM pedido p
+      JOIN estado_pago ep ON p.id_estado_pago = ep.id_estado_pago
+      JOIN estado_pedido ept ON p.id_estado_pedido = ept.id_estado_pedido
+      JOIN usuario u ON p.rut_usuario = u.rut_usuario
+      WHERE p.id_estado_pago = 2 AND p.id_estado_pedido = 1
+      ORDER BY p.fecha_pedido DESC`);
+
+    res.status(200).json(result.rows.map(row => ({
+      id_pedido: row[0],
+      descripcion: row[1],
+      total_a_pagar: row[2],
+      cantidad: row[3],
+      tiene_descuento: row[4],
+      fecha_pedido: row[5],
+      id_sucursal: row[6],
+      estado_pago: row[7],
+      estado_pedido: row[8],
+      id_entrega: row[9],
+      rut_usuario: row[10],
+      cliente: row[11]
+    })));
+  } catch (ex) {
+    res.status(500).json({ error: ex.message });
+  } finally {
+    if (cone) await cone.close();
+  }
+});
+app.patch('/pedidos/:id_pedido/preparacion', validarApiKey, async (req, res) => {
+    let cone;
+    const { id_pedido } = req.params;
+
+    try {
+        cone = await oracledb.getConnection(dbConfig);
+
+        const result = await cone.execute(
+            `UPDATE pedido 
+             SET id_estado_pedido = 2 
+             WHERE id_pedido = :id_pedido`,
+            [id_pedido],
+            { autoCommit: true }
+        );
+
+        if (result.rowsAffected === 0) {
+            return res.status(404).json({ 
+                success: false,
+                error: "Pedido no encontrado" 
+            });
+        }
+
+        res.status(200).json({ 
+            success: true,
+            message: "Pedido actualizado a 'Preparación'",
+            id_pedido
+        });
+
+    } catch (ex) {
+        console.error('Error al actualizar a preparación:', ex);
+        res.status(500).json({ 
+            success: false,
+            error: ex.message
+        });
+    } finally {
+        if (cone) await cone.close();
+    }
+});
+app.patch('/pedidos/:id_pedido/listo-para-entrega', validarApiKey, async (req, res) => {
+    let cone;
+    const { id_pedido } = req.params;
+
+    try {
+        cone = await oracledb.getConnection(dbConfig);
+
+        const result = await cone.execute(
+            `UPDATE pedido 
+             SET id_estado_pedido = 5 
+             WHERE id_pedido = :id_pedido`,
+            [id_pedido],
+            { autoCommit: true }
+        );
+
+        if (result.rowsAffected === 0) {
+            return res.status(404).json({ 
+                success: false,
+                error: "Pedido no encontrado" 
+            });
+        }
+
+        res.status(200).json({ 
+            success: true,
+            message: "Pedido actualizado a 'Listo para entrega'",
+            id_pedido
+        });
+
+    } catch (ex) {
+        console.error('Error al actualizar a listo para entrega:', ex);
+        res.status(500).json({ 
+            success: false,
+            error: ex.message
+        });
+    } finally {
+        if (cone) await cone.close();
+    }
+});
+
+app.get('/pedidos-estado-2', validarApiKey, async (req, res) => {
+  let connection;
+  try {
+    connection = await oracledb.getConnection(dbConfig);
+    
+    const sql = `
+      SELECT 
+        p.id_pedido,
+        p.descripcion,
+        p.total_a_pagar,
+        p.cantidad,
+        p.tiene_descuento,
+        p.fecha_pedido,
+        p.id_sucursal,
+        ep.descripcion AS estado_pago_desc,
+        ept.descripcion AS estado_pedido_desc,
+        p.id_entrega,
+        p.rut_usuario,
+        u.nombre || ' ' || u.primer_apellido AS cliente
+      FROM pedido p
+      JOIN estado_pago ep ON p.id_estado_pago = ep.id_estado_pago
+      JOIN estado_pedido ept ON p.id_estado_pedido = ept.id_estado_pedido
+      JOIN usuario u ON p.rut_usuario = u.rut_usuario
+      WHERE p.id_estado_pedido = 2
+      ORDER BY p.fecha_pedido DESC
+    `;
+
+    const result = await connection.execute(sql);
+
+    const pedidos = result.rows.map(row => ({
+      id_pedido: row[0],
+      descripcion: row[1],
+      total_a_pagar: row[2],
+      cantidad: row[3],
+      tiene_descuento: row[4],
+      fecha_pedido: row[5],
+      id_sucursal: row[6],
+      estado_pago: row[7],
+      estado_pedido: row[8],
+      id_entrega: row[9],
+      rut_usuario: row[10],
+      cliente: row[11],
+    }));
+
+    res.status(200).json(pedidos);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (connection) {
+      try {
+        await connection.close();
+      } catch (err) {
+        console.error('Error closing connection', err);
+      }
+    }
+  }
+});
+app.get('/pedidos-listos', validarApiKey, async (req, res) => {
+  let connection;
+  try {
+    connection = await oracledb.getConnection(dbConfig);
+    
+    const sql = `
+      SELECT 
+        p.id_pedido,
+        p.descripcion,
+        p.total_a_pagar,
+        p.cantidad,
+        p.tiene_descuento,
+        p.fecha_pedido,
+        p.id_sucursal,
+        ep.descripcion AS estado_pago_desc,
+        ept.descripcion AS estado_pedido_desc,
+        p.id_entrega,
+        p.rut_usuario,
+        u.nombre || ' ' || u.primer_apellido AS cliente
+      FROM pedido p
+      JOIN estado_pago ep ON p.id_estado_pago = ep.id_estado_pago
+      JOIN estado_pedido ept ON p.id_estado_pedido = ept.id_estado_pedido
+      JOIN usuario u ON p.rut_usuario = u.rut_usuario
+      WHERE p.id_estado_pedido = 5
+      ORDER BY p.fecha_pedido DESC
+    `;
+
+    const result = await connection.execute(sql);
+
+    const pedidos = result.rows.map(row => ({
+      id_pedido: row[0],
+      descripcion: row[1],
+      total_a_pagar: row[2],
+      cantidad: row[3],
+      tiene_descuento: row[4],
+      fecha_pedido: row[5],
+      id_sucursal: row[6],
+      estado_pago: row[7],
+      estado_pedido: row[8],
+      id_entrega: row[9],
+      rut_usuario: row[10],
+      cliente: row[11],
+    }));
+
+    res.status(200).json(pedidos);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (connection) {
+      try {
+        await connection.close();
+      } catch (err) {
+        console.error('Error closing connection', err);
+      }
+    }
+  }
+});
+app.patch('/pedidos/:id/despachar', validarApiKey, async (req, res) => {
+  const pedidoId = req.params.id;
+  let connection;
+
+  try {
+    connection = await oracledb.getConnection(dbConfig);
+
+    const sql = `
+      UPDATE pedido
+      SET id_estado_pedido = 3
+      WHERE id_pedido = :id
+    `;
+
+    const result = await connection.execute(sql, [pedidoId], { autoCommit: true });
+
+    if (result.rowsAffected === 0) {
+      return res.status(404).json({ message: 'Pedido no encontrado' });
+    }
+
+    res.status(200).json({ message: 'Pedido despachado correctamente' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (connection) {
+      try {
+        await connection.close();
+      } catch (err) {
+        console.error('Error al cerrar la conexión:', err);
+      }
+    }
+  }
+});
+app.patch('/pedidos/:id/entregar', validarApiKey, async (req, res) => {
+  const pedidoId = req.params.id;
+  let connection;
+
+  try {
+    connection = await oracledb.getConnection(dbConfig);
+
+    const sql = `
+      UPDATE pedido
+      SET id_estado_pedido = 4
+      WHERE id_pedido = :id
+    `;
+
+    const result = await connection.execute(sql, [pedidoId], { autoCommit: true });
+
+    if (result.rowsAffected === 0) {
+      return res.status(404).json({ message: 'Pedido no encontrado' });
+    }
+
+    res.status(200).json({ message: 'Pedido marcado como entregado correctamente' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (connection) {
+      try {
+        await connection.close();
+      } catch (err) {
+        console.error('Error al cerrar la conexión:', err);
+      }
+    }
+  }
+});
+
+
+
     app.get('/pedidos',validarApiKey,async (req,res)=>{
         let cone
         try{
@@ -250,6 +649,44 @@
             if (cone) cone.close()
         }
     })
+            app.get('/pedidoss',validarApiKey,async (req,res)=>{
+        let cone
+        try{
+            cone = await oracledb.getConnection(dbConfig)
+            const result = await cone.execute(`
+            SELECT
+            id_pedido,
+            descripcion,
+            total_a_pagar,
+            cantidad,
+            tiene_descuento,
+            fecha_pedido,
+            id_sucursal,
+            id_estado_pago,
+            id_estado_pedido,
+            id_entrega,
+            rut_usuario
+            FROM pedido`)
+            res.status(200).json(result.rows.map(row => ({
+                id_pedido : row[0],
+                descripcion : row[1],
+                total_a_pagar: row[2],
+                cantidad: row[3],
+                tiene_descuento: row[4],
+                fecha_pedido: row[5],
+                id_sucursal: row[6],
+                id_estado_pago: row[7],
+                id_estado_pedido: row[8],
+                id_entrega: row[9],
+                rut_usuario: row[10]
+            })))
+        }catch(ex){
+            res.status(500).json({error: ex.message} )
+        }finally{
+            if (cone) cone.close()
+        }
+    })
+
 
     app.get('/sucursal',validarApiKey,async (req,res)=>{
         let cone
@@ -361,12 +798,14 @@ app.post('/usuarios', validarApiKey, async (req, res) => {
 
         const contraseniaEncriptada = await bcrypt.hash(contrasenia, SALT_ROUNDS);
 
+        const cambioClaveObligatorio = tipo_usuario === 4 ? 'N' : 'S'; // ← Aquí defines la condición
+
         await cone.execute(
             `INSERT INTO usuario
-            (rut_usuario, nombre, primer_apellido, segundo_apellido,cambio_clave_obligatorio, contrasenia, imagen,
+            (rut_usuario, nombre, primer_apellido, segundo_apellido, cambio_clave_obligatorio, contrasenia, imagen,
              genero, correo, direccion, telefono, fecha_nacimiento, id_tipo_usuario, 
              id_sucursal, id_comuna)
-            VALUES(:rut, :nombre, :primer_apellido, :segundo_apellido,:cambio_clave_obligatorio, :contrasenia, :imagen,
+            VALUES(:rut, :nombre, :primer_apellido, :segundo_apellido, :cambio_clave_obligatorio, :contrasenia, :imagen,
                    :genero, :correo, :direccion, :telefono, TO_DATE(:fecha_nacimiento, 'YYYY-MM-DD'),
                    :tipo_usuario, :sucursal, :comuna)`,
             {
@@ -374,6 +813,7 @@ app.post('/usuarios', validarApiKey, async (req, res) => {
                 nombre,
                 primer_apellido,
                 segundo_apellido,
+                cambio_clave_obligatorio: cambioClaveObligatorio,
                 contrasenia: contraseniaEncriptada,
                 imagen,
                 genero,
@@ -383,8 +823,7 @@ app.post('/usuarios', validarApiKey, async (req, res) => {
                 fecha_nacimiento,
                 tipo_usuario,
                 sucursal,
-                comuna,
-                cambio_clave_obligatorio: 'S'  // Por defecto obliga a cambiar clave
+                comuna
             },
             { autoCommit: true }
         );
@@ -397,7 +836,9 @@ app.post('/usuarios', validarApiKey, async (req, res) => {
     }
 });
 
+
 app.post('/pedido-completo', validarApiKey, async (req, res) => {
+  console.log('Pedido recibido:', req.body); 
   const {
     id_pedido, descripcion, total_a_pagar, cantidad, tiene_descuento, fecha_pedido,
     id_sucursal, id_estado_pago, id_estado_pedido, id_entrega, rut_usuario,
@@ -446,6 +887,70 @@ app.post('/pedido-completo', validarApiKey, async (req, res) => {
     if (cone) await cone.close();
   }
 });
+app.get('/pedido-completo/:id', validarApiKey, async (req, res) => {
+  const id_pedido = req.params.id;
+  let cone;
+
+  try {
+    cone = await oracledb.getConnection(dbConfig);
+
+    // 1. Obtener datos del pedido
+    const pedidoResult = await cone.execute(
+      `SELECT p.ID_PEDIDO, p.DESCRIPCION, p.TOTAL_A_PAGAR, p.CANTIDAD, p.TIENE_DESCUENTO,
+              TO_CHAR(p.FECHA_PEDIDO, 'YYYY-MM-DD') AS FECHA_PEDIDO,
+              p.ID_SUCURSAL, p.ID_ESTADO_PAGO, p.ID_ESTADO_PEDIDO,
+              p.ID_ENTREGA, p.RUT_USUARIO
+       FROM PEDIDO p
+       WHERE p.ID_PEDIDO = :id`,
+      [id_pedido],
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+
+    if (pedidoResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+
+    const pedido = pedidoResult.rows[0];
+
+    // 2. Obtener pago del pedido
+    const pagoResult = await cone.execute(
+      `SELECT ID_PAGO, MONTO_TOTAL, TO_CHAR(FECHA_PAGO, 'YYYY-MM-DD') AS FECHA_PAGO,
+              ID_TIPO_PAGO, RUT_USUARIO, IMAGEN
+       FROM PAGO
+       WHERE ID_PEDIDO = :id`,
+      [id_pedido],
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+
+    const pago = pagoResult.rows[0] || null;
+
+    // 3. Obtener detalle del pedido con nombres de productos
+    const detalleResult = await cone.execute(
+      `SELECT dp.ID_PRODUCTO, pr.NOMBRE
+       FROM DETALLE_PEDIDO dp
+       JOIN PRODUCTO pr ON dp.ID_PRODUCTO = pr.ID_PRODUCTO
+       WHERE dp.ID_PEDIDO = :id`,
+      [id_pedido],
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+
+    const detalles = detalleResult.rows;
+
+    // 4. Responder con los datos combinados
+    res.json({
+      pedido,
+      pago,
+      detalles
+    });
+
+  } catch (error) {
+    console.error('Error al obtener el pedido completo:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (cone) await cone.close();
+  }
+});
+
 
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
@@ -757,41 +1262,42 @@ app.patch('/usuarios/:rut', validarApiKey, async (req, res) => {
     const SECRET_KEY = 'bd_clavitos'; 
 
     
-    app.post('/login', async (req, res) => {
+app.post('/login', async (req, res) => {
     let cone;
     const { correo, contrasenia } = req.body;
 
     try {   
         cone = await oracledb.getConnection(dbConfig);
         const result = await cone.execute(
-        `SELECT rut_usuario, nombre, id_tipo_usuario,contrasenia ,cambio_clave_obligatorio
-        FROM usuario 
-        WHERE correo = :correo`,
-        { correo}
+            `SELECT rut_usuario, nombre, id_tipo_usuario, contrasenia, cambio_clave_obligatorio
+             FROM usuario 
+             WHERE correo = :correo`,
+            { correo }
         );
 
         if (result.rows.length === 0) {
-        return res.status(401).json({ error: "Credenciales inválidas" });
+            return res.status(401).json({ error: "Credenciales inválidas" });
         }
+
         const row = result.rows[0];
         const isMatch = await bcrypt.compare(contrasenia, row[3]);
         if (!isMatch) {
-        return res.status(401).json({ error: "Credenciales inválidas" });
-    }
+            return res.status(401).json({ error: "Credenciales inválidas" });
+        }
+
         const user = {
             rut: row[0],
             nombre: row[1],
             tipoUsuario: row[2],
-            cambioClaveObligatorio: row[4] === 'S'
-          };
+            cambioClaveObligatorio: row[4] === 'S' && row[2] !== 4 
+        };
 
-        // Genera token JWT válido por 1 hora
         const token = jwt.sign(user, SECRET_KEY, { expiresIn: '1h' });
 
         res.json({ 
-        mensaje: "Login exitoso",
-        token,
-        usuario: user
+            mensaje: "Login exitoso",
+            token,
+            usuario: user
         });
 
     } catch (error) {
@@ -799,7 +1305,8 @@ app.patch('/usuarios/:rut', validarApiKey, async (req, res) => {
     } finally {
         if (cone) await cone.close();
     }
-    });
+});
+
 
 app.post('/usuarios/validar-token', async (req, res) => {
   try {
@@ -985,12 +1492,16 @@ app.get('/sucursal/:id/comuna', validarApiKey, async (req, res) => {
 
 (async () => {
   const adminHash = await bcrypt.hash('Admin123.', 10);
-  const mariaHash = await bcrypt.hash('bodega456', 10);
-  const carlosHash = await bcrypt.hash('contador123', 10);
+  const mariaHash = await bcrypt.hash('Bodega123.', 10);
+  const carlosHash = await bcrypt.hash('Cliente123.', 10);
+  const JuanHash = await bcrypt.hash('Contador123.', 10);
+  const ElvaHash = await bcrypt.hash('Vendedor123.', 10);
 
   console.log('Admin:', adminHash);
   console.log('María:', mariaHash);
   console.log('Carlos:', carlosHash);
+  console.log('Juan:', JuanHash);
+  console.log('Elva:', ElvaHash);
 })();
 app.listen(puerto,()=>{
     console.log(`API escuchando en puerto ${puerto}`)
