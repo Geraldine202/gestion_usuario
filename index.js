@@ -319,28 +319,71 @@ app.patch('/pedidos/:id_pedido/preparacion', validarApiKey, async (req, res) => 
     try {
         cone = await oracledb.getConnection(dbConfig);
 
-        const result = await cone.execute(
-            `UPDATE pedido 
-             SET id_estado_pedido = 2 
-             WHERE id_pedido = :id_pedido`,
-            [id_pedido],
-            { autoCommit: true }
+        // Iniciar transacción
+
+        // 1. Obtener los productos del pedido con sus cantidades (cantidad tomada de PEDIDO)
+        const detallesQuery = `
+            SELECT dp.ID_PRODUCTO, p.NOMBRE, p.STOCK, ped.CANTIDAD
+            FROM DETALLE_PEDIDO dp
+            JOIN PRODUCTO p ON dp.ID_PRODUCTO = p.ID_PRODUCTO
+            JOIN PEDIDO ped ON dp.ID_PEDIDO = ped.ID_PEDIDO
+            WHERE dp.ID_PEDIDO = :id_pedido
+        `;
+        const detallesResult = await cone.execute(detallesQuery, [id_pedido]);
+
+        if (detallesResult.rows.length === 0) {
+            throw new Error('No se encontraron productos para este pedido');
+        }
+
+        // 2. Verificar stock suficiente para todos los productos (usando cantidad global)
+        for (const detalle of detallesResult.rows) {
+            const id_producto = detalle[0];
+            const nombre = detalle[1];
+            const stockActual = detalle[2];
+            const cantidadPedida = detalle[3];
+
+            if (stockActual < cantidadPedida) {
+                throw new Error(`Stock insuficiente para ${nombre}. Stock actual: ${stockActual}, cantidad pedida: ${cantidadPedida}`);
+            }
+        }
+
+        // 3. Actualizar stock de cada producto (restar cantidad global a cada producto)
+        for (const detalle of detallesResult.rows) {
+            const id_producto = detalle[0];
+            const cantidadPedida = detalle[3];
+
+            await cone.execute(
+                `UPDATE PRODUCTO SET STOCK = STOCK - :cantidad 
+                 WHERE ID_PRODUCTO = :id_producto`,
+                [cantidadPedida, id_producto]
+            );
+        }
+
+        // 4. Actualizar estado del pedido a "en preparación" (estado 2)
+        const updatePedido = await cone.execute(
+            `UPDATE PEDIDO 
+             SET ID_ESTADO_PEDIDO = 2 
+             WHERE ID_PEDIDO = :id_pedido`,
+            [id_pedido]
         );
 
-        if (result.rowsAffected === 0) {
-            return res.status(404).json({ 
-                success: false,
-                error: "Pedido no encontrado" 
-            });
+        if (updatePedido.rowsAffected === 0) {
+            throw new Error("Pedido no encontrado");
         }
+
+        // Confirmar transacción
+        await cone.execute('COMMIT');
 
         res.status(200).json({ 
             success: true,
-            message: "Pedido actualizado a 'Preparación'",
+            message: "Pedido actualizado a 'Preparación' y stock reducido",
             id_pedido
         });
 
     } catch (ex) {
+        // Rollback en caso de error
+        if (cone) await cone.execute('ROLLBACK');
+        
         console.error('Error al actualizar a preparación:', ex);
         res.status(500).json({ 
             success: false,
@@ -350,6 +393,7 @@ app.patch('/pedidos/:id_pedido/preparacion', validarApiKey, async (req, res) => 
         if (cone) await cone.close();
     }
 });
+
 app.patch('/pedidos/:id_pedido/listo-para-entrega', validarApiKey, async (req, res) => {
     let cone;
     const { id_pedido } = req.params;
