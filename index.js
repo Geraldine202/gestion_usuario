@@ -951,6 +951,70 @@ app.get('/pedido-completo/:id', validarApiKey, async (req, res) => {
   }
 });
 
+app.get('/pedido-usuario/:rut', validarApiKey, async (req, res) => {
+  const rut = req.params.rut;
+  let cone;
+
+  try {
+    cone = await oracledb.getConnection(dbConfig);
+
+    // 1. Obtener todos los pedidos del usuario
+    const pedidosResult = await cone.execute(
+      `SELECT p.ID_PEDIDO, p.DESCRIPCION, p.TOTAL_A_PAGAR, p.CANTIDAD, p.TIENE_DESCUENTO,
+              TO_CHAR(p.FECHA_PEDIDO, 'YYYY-MM-DD') AS FECHA_PEDIDO,
+              p.ID_SUCURSAL, p.ID_ESTADO_PAGO, p.ID_ESTADO_PEDIDO,
+              p.ID_ENTREGA, p.RUT_USUARIO
+       FROM PEDIDO p
+       WHERE p.RUT_USUARIO = :rut`,
+      [rut],
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+
+    if (pedidosResult.rows.length === 0) {
+      return res.status(404).json({ error: 'No se encontraron pedidos para este usuario' });
+    }
+
+    const pedidos = pedidosResult.rows;
+
+    // Para cada pedido, obtener pago y detalles
+    const pedidosConDetalles = await Promise.all(pedidos.map(async (pedido) => {
+      const pagoResult = await cone.execute(
+        `SELECT ID_PAGO, MONTO_TOTAL, TO_CHAR(FECHA_PAGO, 'YYYY-MM-DD') AS FECHA_PAGO,
+                ID_TIPO_PAGO, RUT_USUARIO, IMAGEN
+         FROM PAGO
+         WHERE ID_PEDIDO = :id`,
+        [pedido.ID_PEDIDO],
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      const pago = pagoResult.rows[0] || null;
+
+      const detalleResult = await cone.execute(
+        `SELECT dp.ID_PRODUCTO, pr.NOMBRE
+         FROM DETALLE_PEDIDO dp
+         JOIN PRODUCTO pr ON dp.ID_PRODUCTO = pr.ID_PRODUCTO
+         WHERE dp.ID_PEDIDO = :id`,
+        [pedido.ID_PEDIDO],
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      const detalles = detalleResult.rows;
+
+      return {
+        pedido,
+        pago,
+        detalles
+      };
+    }));
+
+    res.json(pedidosConDetalles);
+
+  } catch (error) {
+    console.error('Error al obtener pedidos:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (cone) await cone.close();
+  }
+});
+
 
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
