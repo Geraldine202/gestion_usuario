@@ -1287,6 +1287,34 @@ app.patch('/usuarios/:rut', validarApiKey, async (req, res) => {
     let campos = [];
     let valores = {};
     let cambioClaveObligatorio = null;
+
+    // Obtener contraseña actual si se envía una nueva
+    let contraseniaActualHasheada = null;
+    if (contrasenia !== undefined && typeof contrasenia === 'string' && contrasenia.trim() !== '') {
+      const resultPass = await cone.execute(
+        'SELECT contrasenia FROM usuario WHERE rut_usuario = :rut',
+        { rut }
+      );
+
+      if (resultPass.rows.length === 0) {
+        return res.status(404).json({ mensaje: 'Usuario no encontrado' });
+      }
+
+      contraseniaActualHasheada = resultPass.rows[0][0];
+
+      const esIgual = await bcrypt.compare(contrasenia, contraseniaActualHasheada);
+      if (esIgual) {
+        return res.status(400).json({ mensaje: 'La nueva contraseña no puede ser igual a la anterior' });
+      }
+
+      valores.contrasenia = await bcrypt.hash(contrasenia, SALT_ROUNDS);
+      campos.push('contrasenia = :contrasenia');
+      cambioClaveObligatorio = 'N';
+    } else if (contrasenia !== undefined) {
+      return res.status(400).json({ mensaje: 'Contraseña inválida' });
+    }
+
+    // Resto de campos
     if (nombre !== undefined) {
       campos.push('nombre = :nombre');
       valores.nombre = nombre;
@@ -1298,15 +1326,6 @@ app.patch('/usuarios/:rut', validarApiKey, async (req, res) => {
     if (segundo_apellido !== undefined) {
       campos.push('segundo_apellido = :segundo_apellido');
       valores.segundo_apellido = segundo_apellido;
-    }
-    if (contrasenia !== undefined) {
-      if (typeof contrasenia === 'string' && contrasenia.trim() !== '') {
-        valores.contrasenia = await bcrypt.hash(contrasenia, SALT_ROUNDS);
-        campos.push('contrasenia = :contrasenia');
-        cambioClaveObligatorio = 'N';
-      } else {
-        return res.status(400).json({ mensaje: 'Contraseña inválida' });
-      }
     }
     if (imagen !== undefined) {
       campos.push('imagen = :imagen');
@@ -1325,7 +1344,6 @@ app.patch('/usuarios/:rut', validarApiKey, async (req, res) => {
       valores.telefono = telefono;
     }
     if (fecha_nacimiento !== undefined) {
-      // Validar formato fecha o parsear antes
       campos.push(`fecha_nacimiento = TO_DATE(:fecha_nacimiento, 'YYYY-MM-DD')`);
       valores.fecha_nacimiento = fecha_nacimiento;
     }
@@ -1366,6 +1384,7 @@ app.patch('/usuarios/:rut', validarApiKey, async (req, res) => {
 
 
 
+
     const jwt = require('jsonwebtoken');
     const SECRET_KEY = 'bd_clavitos'; 
 
@@ -1384,13 +1403,13 @@ app.post('/login', async (req, res) => {
         );
 
         if (result.rows.length === 0) {
-            return res.status(401).json({ error: "Credenciales inválidas" });
+            return res.status(401).json({ error: "El correo no esta registrado" });
         }
 
         const row = result.rows[0];
         const isMatch = await bcrypt.compare(contrasenia, row[3]);
         if (!isMatch) {
-            return res.status(401).json({ error: "Credenciales inválidas" });
+            return res.status(401).json({ error: "La contraseña es incorrecta" });
         }
 
         const user = {
